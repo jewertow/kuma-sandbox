@@ -1,0 +1,178 @@
+version: '3.5'
+
+services:
+
+  # Kuma Control Plane in "universal" mode with "in-memory" configuration store.
+  kuma-control-plane:
+    # image name must be provided via environment variable KUMA_CP_DOCKER_IMAGE
+    image: kuma-cp-sandbox:latest
+    volumes:
+      - ./certs/server:/certs/server
+      - ./certs/client/cert.pem:/certs/client/cert.pem
+    command:
+      - run
+      - --log-level=info
+    environment:
+      # DNS name of the Kuma xDS server
+      - KUMA_GENERAL_TLS_CERT_FILE=/certs/server/cert.pem
+      - KUMA_GENERAL_TLS_KEY_FILE=/certs/server/key.pem
+      - KUMA_API_SERVER_AUTH_CLIENT_CERTS_DIR=/certs/client
+    expose:
+      - "5678"
+      - "5680"
+      - "5681"
+      - "5682"
+    ports:
+      - "5678:5678"
+      - "5680:5680"
+      - "5681:5681"
+      - "5682:5682"
+    networks:
+      kuma-example:
+        aliases:
+          - kuma-control-plane
+    restart: on-failure
+
+  # Installation script for Kuma example.
+  # Uses `kumactl` to create Dataplane resources, generate dataplane tokens, etc.
+  kuma-example-installer:
+    # image name must be provided via environment variable KUMACTL_DOCKER_IMAGE
+    image: kumactl-sandbox:latest
+    volumes:
+      - ./kuma-example-installer.sh:/kuma-example/kuma-example-installer.sh
+      - token-frontend:/frontend:rw
+      - token-backend:/backend:rw
+      - ./certs/server/cert.pem:/certs/server/cert.pem
+      - ./certs/client:/certs/client
+    user: root # needed to write the tokens, named volumes are mounted with root permissions
+    command:
+      - /kuma-example/kuma-example-installer.sh
+    networks:
+      kuma-example: { }
+    depends_on:
+      - kuma-control-plane
+    restart: on-failure
+
+  # Container with `kumactl` to edit Kuma resources as part of e2e workflow.
+  kumactl:
+    # image name must be provided via environment variable KUMACTL_DOCKER_IMAGE
+    image: kumactl-sandbox:latest
+    volumes:
+      - ./policies:/kuma-example/policies
+    command:
+      - /bin/sh
+      - -c
+      - |
+        kumactl config control-planes add --name universal --address http://kuma-control-plane:5681 --overwrite
+        kumactl apply -f /kuma-example/policies/mtls.yaml
+        sleep 31536000
+    networks:
+      kuma-example: { }
+    depends_on:
+      - kuma-control-plane
+    restart: on-failure
+
+  frontend-namespace:
+    image: busybox:1.31.0
+    command: [ "sleep", "infinity" ]
+    expose:
+      - "6060"
+    # The following `ports` configuration was originally a part of `frontend` service.
+    # However, `ports` settings are incompatible with `network_mode: service:...`
+    # and had to be moved here.
+    ports:
+      - "6060:6060"
+    networks:
+      kuma-example:
+        aliases:
+          - frontend
+    depends_on:
+      - kuma-control-plane
+    restart: on-failure
+
+  frontend:
+    image: http-log-echo:latest
+    # the following setting instructs Docker Compose to add `kuma-example-web` container
+    # to the network namespace of `kuma-example-web-namespace` container
+    network_mode: service:frontend-namespace
+    depends_on:
+      - frontend-namespace
+    restart: on-failure
+
+  frontend-sidecar:
+    # image name must be provided via environment variable KUMA_DP_DOCKER_IMAGE
+    image: kuma-dp-sandbox:latest
+    command:
+      - run
+      - --log-level=info
+    volumes:
+      - token-frontend:/var/kuma.io/kuma-dp/frontend
+    environment:
+      - KUMA_CONTROL_PLANE_URL=https://kuma-control-plane:5678
+      - KUMA_DATAPLANE_MESH=default
+      - KUMA_DATAPLANE_NAME=frontend
+      - KUMA_DATAPLANE_ADMIN_PORT=9901
+      - KUMA_DATAPLANE_RUNTIME_TOKEN_PATH=/var/kuma.io/kuma-dp/frontend/token
+    # the following setting instructs Docker Compose to add `kuma-example-web-sidecar` container
+    # to the network namespace of `kuma-example-web-namespace` container
+    network_mode: service:frontend-namespace
+    depends_on:
+      - frontend
+    restart: on-failure
+
+  # Auxiliary service (container) for sharing Linux network namespace
+  # between Example Backend v1 and Kuma Sidecar.
+  backend-namespace:
+    image: busybox:1.31.0
+    command: [ "sleep", "infinity" ]
+    expose:
+      - "7070"
+    # The following `ports` configuration was originally a part of `kuma-example-backend-v1` service.
+    # However, `ports` settings are incompatible with `network_mode: service:...`
+    # and had to be moved here.
+    ports:
+      - "17070:7070"
+    networks:
+      kuma-example:
+        aliases:
+          - backend
+    depends_on:
+      - kuma-control-plane
+    restart: on-failure
+
+  backend:
+    image: http-log-echo:latest
+    # the following setting instructs Docker Compose to add `kuma-example-backend-v1` container
+    # to the network namespace of `kuma-example-backend-v1-namespace` container
+    network_mode: service:backend-namespace
+    depends_on:
+      - backend-namespace
+    restart: on-failure
+
+  backend-sidecar:
+    # image name must be provided via environment variable KUMA_DP_DOCKER_IMAGE
+    image: kuma-dp-sandbox:latest
+    command:
+      - run
+      - --log-level=info
+    volumes:
+      - token-backend:/var/kuma.io/kuma-dp/backend
+    environment:
+      - KUMA_CONTROL_PLANE_URL=https://kuma-control-plane:5678
+      - KUMA_DATAPLANE_MESH=default
+      - KUMA_DATAPLANE_NAME=backend
+      - KUMA_DATAPLANE_ADMIN_PORT=9901
+      - KUMA_DATAPLANE_RUNTIME_TOKEN_PATH=/var/kuma.io/kuma-dp/backend/token
+    # the following setting instructs Docker Compose to add `kuma-example-backend-v1-sidecar` container
+    # to the network namespace of `kuma-example-backend-v1-namespace` container
+    network_mode: service:backend
+    depends_on:
+      - backend
+    restart: on-failure
+
+networks:
+  kuma-example: {}
+
+volumes:
+  token-frontend:
+  token-backend:
