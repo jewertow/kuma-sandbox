@@ -4,8 +4,6 @@ mesh: default
 sources:
 - match:
     kuma.io/service: '*'
-    kuma.io/zone: eu-west-1
 destinations:
 - match:
     kuma.io/service: '*'
-    kuma.io/zone: eu-west-1

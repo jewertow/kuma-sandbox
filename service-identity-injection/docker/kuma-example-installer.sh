@@ -105,7 +105,7 @@ networking:
     tags:
       kuma.io/service: backend
       kuma.io/protocol: http
-      kuma.io/zone: eu-west-1
+      kuma.io/zone: us-east-1
   outbound:
   - port: 5000
     service: frontend"
